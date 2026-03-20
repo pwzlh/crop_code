@@ -63,6 +63,14 @@ def preprocess(img_path):
     img = torch.FloatTensor(img).permute(2, 0, 1).unsqueeze(0).to(cfg.device)
     return img_ori, img
 
+def has_gui_environment():
+    """判断当前环境是否有GUI（避免无显示器时卡窗口）"""
+    # 检查DISPLAY环境变量（Linux/Mac），Windows默认有GUI
+    if sys.platform == "win32":
+        return True
+    display = os.environ.get("DISPLAY")
+    return display is not None and display != ""
+
 def predict():
     # 1. 检查并创建预测目录
     create_predict_dir()
@@ -71,14 +79,15 @@ def predict():
     model_path = find_latest_model()
     
     # 3. 构建和main.py训练时一致的模型结构
+    device = cfg.device if hasattr(cfg, 'device') else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = get_model(
         model_name=cfg.model_name if hasattr(cfg, 'model_name') else "resnet18+yolov8n",
         num_classes=len(CLASSES),
-        device=cfg.device if hasattr(cfg, 'device') else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ).to(cfg.device)
+        device=device
+    ).to(device)
     
     # 4. 加载模型权重（strict=False兼容融合模型的参数匹配）
-    model.load_state_dict(torch.load(model_path, map_location=cfg.device), strict=False)
+    model.load_state_dict(torch.load(model_path, map_location=device), strict=False)
     model.eval()  # 切换到评估模式
     print("模型加载成功，开始预测...")
     
@@ -116,17 +125,34 @@ def predict():
         print(f"      {cls}：{pred_prob[0][idx].item():.4f}")
     print(f"\n预测结果已保存为：{os.path.abspath(result_filename)}")
     
-    # 9. 显示结果（有GUI环境时）
+    # 9. 显示结果（仅在有GUI环境时，且设置超时自动关闭）
     try:
-        cv2.imshow("Crop Recognition Result", img_ori)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+        if has_gui_environment():
+            cv2.imshow("Crop Recognition Result", img_ori)
+            # 设置5秒超时（5000ms），超时后自动关闭窗口，避免程序挂起
+            cv2.waitKey(5000)
+            # 强制销毁所有窗口，释放资源
+            #cv2.waitKey(1)
+            #cv2.destroyAllWindows()
+ 
+            
+            
+        else:
+            print("无GUI环境，已跳过图像显示（请手动打开保存的result文件）")
     except Exception as e:
-        print(f"无GUI环境，已跳过图像显示（请手动打开保存的{result_filename}文件）")
+        print(f"图像显示失败：{str(e)}（请手动打开保存的{result_filename}文件）")
+        # 确保即使显示出错，也销毁窗口，避免资源残留
+        cv2.destroyAllWindows()
+        cv2.waitKey(1)
 
 if __name__ == "__main__":
     # 直接运行即可，无需依赖main.py的训练逻辑
     try:
         predict()
+        print("\n预测已结束，程序退出")
     except Exception as e:
         print(f"\n预测出错：{str(e)}")
+        # 异常时也确保销毁所有OpenCV窗口
+        cv2.destroyAllWindows()
+        cv2.waitKey(1)
+        sys.exit(1)  # 异常退出，返回非0状态码

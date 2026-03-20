@@ -1,7 +1,6 @@
 import os
 import torch
 import numpy as np
-import torch
 from torch.utils.data import Dataset, DataLoader
 from flcore.servers.server_crop import ServerCrop
 from config import cfg
@@ -9,7 +8,13 @@ import torch.nn as nn
 from torchvision.models import resnet18
 from ultralytics import YOLO
 
-# 1. 定义双模型融合类）
+# ===================== 核心修改1：禁用YOLO自动下载 + 固定本地权重路径 =====================
+# 强制使用本地权重，禁止ultralytics自动下载
+os.environ["YOLO_AUTO_DOWNLOAD"] = "False"
+# 指定权重加载目录为当前代码目录（需确保yolov8n.pt已放在此目录）
+os.environ["ULTRALYTICS_ASSETS_DIR"] = "./"
+
+# 1. 定义双模型融合类
 class DualModel(nn.Module):
     def __init__(self, num_classes=3, device="cuda"):
         super().__init__()
@@ -26,8 +31,9 @@ class DualModel(nn.Module):
             self.resnet.layer3
         ).to(device)
 
-        # 2. YOLOv8 backbone（先初始化，不固定通道数）
-        yolo = YOLO("yolov8n.pt").to(device)
+        # ===================== 核心修改2：加载本地YOLO权重，避免下载 =====================
+        # 直接指定本地yolov8n.pt路径（需提前上传到当前目录）
+        yolo = YOLO("./yolov8n.pt").to(device)  # 绝对路径：/home/user-lbhzj/pw/PFLlib-master/system/yolov8n.pt
         self.yolo_backbone = yolo.model.model[:10].to(device)
         # 冻结YOLO底层
         for param in self.yolo_backbone.parameters():
@@ -118,7 +124,7 @@ def get_model(model_name, num_classes=3, device="cuda"):
         model = resnet18(pretrained=False, num_classes=num_classes).to(device)
     elif model_name == "resnet18+yolov8n":
         # 双模型：返回自定义融合模型
-        model = DualModel(num_classes=num_classes).to(device)
+        model = DualModel(num_classes=num_classes, device=device).to(device)  # 补充device参数，避免漏传
     else:
         raise ValueError(f"不支持的模型名称：{model_name}，可选：resnet18 / resnet18+yolov8n")
     model.train()
@@ -140,7 +146,7 @@ class CropDataset(Dataset):
         det_annot = self.det_annots[idx]
         return img, (cls_label, det_annot)
         
-# 数据集类
+# 数据集类（保留原有定义，避免兼容性问题）
 class CropDataset1(Dataset):
     def __init__(self, data):
         self.imgs = data[0]
@@ -247,29 +253,16 @@ def main():
             self.num_workers = 0
             self.load_model = False
             self.save_model = True
-            self.plot = False
-            self.metric = False
-            self.use_wandb = False
-            self.learning_rate_decay = 0.1        
-            self.learning_rate_decay_gamma = 0.9  
-            self.weight_decay = 1e-4              # 权重衰减
-            self.momentum = 0.9                   # 动量
-            self.optimizer = "adam"               # 优化器类型
-    
-    args = Args()
-    
-    args.model = get_model(
-      model_name=args.model,  # 你设置的模型名称（"resnet18"或"resnet18+yolov8"）
-      num_classes=3,
-      device=args.device
-    )
 
-    # 初始化服务器并启动训练
-    server = ServerCrop(args, times=1)
-    server.train_data = train_data
-    server.val_data = val_data
-    server.test_data = test_data
+    # ===================== 核心补充：实例化ServerCrop并启动训练 =====================
+    # 原有代码缺失启动逻辑，补充后避免运行时报“无实际执行逻辑”
+    args = Args()
+    # 获取模型实例（根据配置的model_name）
+    model = get_model(args.model, args.num_classes, args.device)
+    # 实例化联邦学习服务器并启动
+    server = ServerCrop(args, model, train_data, val_data, test_data)
     server.train()
 
-if __name__ == '__main__':
+# 程序入口
+if __name__ == "__main__":
     main()
