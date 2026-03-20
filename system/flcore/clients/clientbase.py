@@ -50,71 +50,15 @@ class Client(object):
             gamma=args.learning_rate_decay_gamma
         )
         self.learning_rate_decay = args.learning_rate_decay
-    
+
+
     def load_train_data(self, batch_size=None):
         if batch_size == None:
             batch_size = self.batch_size
-            
-        # 1. 读取训练数据 + 过滤空值（和test逻辑一致）
         train_data = read_client_data(self.dataset, self.id, is_train=True, few_shot=self.few_shot)
-        train_data = [item for item in train_data if item is not None]
-        
-        # 2. 训练数据为空时，生成320×320虚拟数据（和test逻辑一致）
-        if len(train_data) == 0:
-            import torch
-            dummy_img = torch.randn(3, 320, 320).type(torch.float32)
-            dummy_label = torch.tensor(0).type(torch.int64)
-            train_data = [(dummy_img, dummy_label)]
-            batch_size = 1  # 强制批量为1
-            print(f"Warning: Client {self.id} train data empty, use 1 dummy sample (320x320)")
-        
-        # 3. 避免样本被丢弃（和test逻辑一致）
-        return DataLoader(train_data, batch_size=batch_size, drop_last=False, shuffle=True)
-    
-    def load_train_data1(self, batch_size=None):
-        if batch_size == None:
-            batch_size = self.batch_size
-            
-        train_data = read_client_data(self.dataset, self.id, is_train=True, few_shot=self.few_shot)
-        
-        # 修复1：变量名错误（test_data → train_data）+ 过滤空数据
-        train_data = [item for item in train_data if item is not None]
-        # 修复2：训练数据为空时的兜底逻辑
-        if len(train_data) == 0:
-            import torch
-            # 关键：改为320×320匹配你的数据集
-            dummy_img = torch.randn(3, 320, 320).type(torch.float32)  
-            dummy_label = torch.tensor(0).type(torch.int64)            
-            train_data = [(dummy_img, dummy_label)]
-            batch_size = 1  
-            print(f"Warning: Client {self.id} train data is empty, use dummy sample (320x320)")
-        
         return DataLoader(train_data, batch_size, drop_last=True, shuffle=True)
-           
+
     def load_test_data(self, batch_size=None):
-        if batch_size == None:
-            batch_size = self.batch_size
-        
-        # 1. 读取数据并过滤空值
-        test_data = read_client_data(self.dataset, self.id, is_train=False, few_shot=self.few_shot)
-        # 强制过滤空数据项
-        test_data = [item for item in test_data if item is not None]
-        
-        # 2. 若数据为空，强制设batch_size=1并生成1条虚拟数据
-        if len(test_data) == 0:
-            import torch
-            # 修复3：虚拟数据尺寸改为320×320
-            dummy_img = torch.randn(3, 320, 320).type(torch.float32)  # 匹配你的数据集
-            dummy_label = torch.tensor(0).type(torch.int64)            # 单标签
-            test_data = [(dummy_img, dummy_label)]
-            batch_size = 1  # 强制批量为1
-            print(f"Client {self.id} test data empty, use 1 dummy sample (320x320)")
-        
-        # 3. 初始化DataLoader（强制shuffle=False避免空数据报错）
-        return DataLoader(test_data, batch_size=batch_size, drop_last=False, shuffle=False)
-
-
-    def load_test_data1(self, batch_size=None):
         if batch_size == None:
             batch_size = self.batch_size
         test_data = read_client_data(self.dataset, self.id, is_train=False, few_shot=self.few_shot)
@@ -200,6 +144,23 @@ class Client(object):
 
         return losses, train_num
 
+    # def get_next_train_batch(self):
+    #     try:
+    #         # Samples a new batch for persionalizing
+    #         (x, y) = next(self.iter_trainloader)
+    #     except StopIteration:
+    #         # restart the generator if the previous generator is exhausted.
+    #         self.iter_trainloader = iter(self.trainloader)
+    #         (x, y) = next(self.iter_trainloader)
+
+    #     if type(x) == type([]):
+    #         x = x[0]
+    #     x = x.to(self.device)
+    #     y = y.to(self.device)
+
+    #     return x, y
+
+
     def save_item(self, item, item_name, item_path=None):
         if item_path == None:
             item_path = self.save_folder_name
@@ -211,3 +172,7 @@ class Client(object):
         if item_path == None:
             item_path = self.save_folder_name
         return torch.load(os.path.join(item_path, "client_" + str(self.id) + "_" + item_name + ".pt"))
+
+    # @staticmethod
+    # def model_exists():
+    #     return os.path.exists(os.path.join("models", "server" + ".pt"))
