@@ -66,6 +66,32 @@ from utils.result_utils import average_data
 from utils.mem_utils import MemReporter
 
 
+# -------------------------- 新增：多卡并行适配（仅新增，不修改原有逻辑） --------------------------
+def setup_device(args):
+    """适配device和device_id，支持多卡"""
+    if args.device == "cuda":
+        # 设置可见GPU
+        if args.device_id:
+            os.environ["CUDA_VISIBLE_DEVICES"] = args.device_id
+        # 检查GPU可用性
+        if not torch.cuda.is_available():
+            warnings.warn("CUDA不可用，自动切换到CPU")
+            args.device = torch.device("cpu")
+        else:
+            args.device = torch.device("cuda")
+            # 多卡时封装模型为DataParallel
+            args.multi_gpu = torch.cuda.device_count() > 1
+    else:
+        args.device = torch.device("cpu")
+        args.multi_gpu = False
+
+def wrap_model_for_parallel(model, args):
+    """多卡模型封装（仅多卡时生效）"""
+    if args.multi_gpu and args.device.type == "cuda":
+        model = nn.DataParallel(model)
+        print(f"[Multi-GPU] 启用 {torch.cuda.device_count()} 个GPU并行训练")
+    return model
+    
 logger = logging.getLogger()
 logger.setLevel(logging.ERROR)
 
@@ -94,9 +120,9 @@ def run(args):
                 args.model = Mclr_Logistic(60, num_classes=args.num_classes).to(args.device)
 
         elif model_str == "CNN": # non-convex
-            if "MNIST" in args.dataset:
-                args.model = FedAvgCNN(in_features=1, num_classes=args.num_classes, dim=1024).to(args.device)
-            elif "Cifar10" in args.dataset:
+            #if "MNIST" in args.dataset:
+                #args.model = FedAvgCNN(in_features=1, num_classes=args.num_classes, dim=1024).to(args.device)
+            if "Cifar10" in args.dataset:
                 args.model = FedAvgCNN(in_features=3, num_classes=args.num_classes, dim=1600).to(args.device)
             elif "Omniglot" in args.dataset:
                 args.model = FedAvgCNN(in_features=1, num_classes=args.num_classes, dim=33856).to(args.device)
@@ -113,15 +139,40 @@ def run(args):
                 args.model = DNN(3*32*32, 100, num_classes=args.num_classes).to(args.device)
             else:
                 args.model = DNN(60, 20, num_classes=args.num_classes).to(args.device)
-        
-        elif model_str == "ResNet18":
-         
+
+        elif model_str == "ResNet181":
             args.model = torchvision.models.resnet18(pretrained=False, num_classes=args.num_classes)
+            if "Cifar10" in args.dataset:
+                args.model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+                args.model.maxpool = nn.Identity()
+            args.model = args.model.to(args.device)
+            
+        elif model_str == "ResNet18":
+            args.model = torchvision.models.resnet18(pretrained=False, num_classes=args.num_classes)
+            
+            # 1. 替换 BN 为 GN 
+            def replace_bn(module):
+                for name, child in module.named_children():
+                    if isinstance(child, nn.BatchNorm2d):
+                        setattr(module, name, nn.GroupNorm(2, child.num_features))
+                    else: replace_bn(child)
+            replace_bn(args.model)
+
+            # 2. Kaiming 初始化 
+            for m in args.model.modules():
+                if isinstance(m, nn.Conv2d):
+                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                elif isinstance(m, nn.Linear):
+                    nn.init.normal_(m.weight, 0, 0.01)
+                    nn.init.constant_(m.bias, 0)
+
+            # 3. 尺寸适配
             if "Cifar10" in args.dataset:
                 args.model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
                 args.model.maxpool = nn.Identity()
             
             args.model = args.model.to(args.device)
+
             
         
         elif model_str == "ResNet10":
@@ -186,6 +237,8 @@ def run(args):
         else:
             raise NotImplementedError
 
+        # -------------------------- 新增：多卡模型封装 --------------------------
+        args.model = wrap_model_for_parallel(args.model, args)
         print(args.model)
 
         # select algorithm
@@ -402,18 +455,18 @@ if __name__ == "__main__":
     parser.add_argument('-data', "--dataset", type=str, default="Cifar10")
     parser.add_argument('-ncl', "--num_classes", type=int, default=10)
     parser.add_argument('-m', "--model", type=str, default="ResNet18")
-    parser.add_argument('-lbs', "--batch_size", type=int, default=10)    #10
-    parser.add_argument('-lr', "--local_learning_rate", type=float, default=0.001,
+    parser.add_argument('-lbs', "--batch_size", type=int, default=64)    #10
+    parser.add_argument('-lr', "--local_learning_rate", type=float, default=0.01,
                         help="Local learning rate")
-    parser.add_argument('-ld', "--learning_rate_decay", type=bool, default=True)#False
-    parser.add_argument('-ldg', "--learning_rate_decay_gamma", type=float, default=0.97)#0.97
+    parser.add_argument('-ld', "--learning_rate_decay", type=bool, default=False)#False
+    parser.add_argument('-ldg', "--learning_rate_decay_gamma", type=float, default=0.98)
     parser.add_argument('-gr', "--global_rounds", type=int, default=100)
     parser.add_argument('-tc', "--top_cnt", type=int, default=100, 
                         help="For auto_break")
-    parser.add_argument('-ls', "--local_epochs", type=int, default=3, #1
+    parser.add_argument('-ls', "--local_epochs", type=int, default=5, #1
                         help="Multiple update steps in one local epoch.")
-    parser.add_argument('-algo', "--algorithm", type=str, default="FedProx")
-    parser.add_argument('-jr', "--join_ratio", type=float, default=0.5,
+    parser.add_argument('-algo', "--algorithm", type=str, default="FedProx")#model
+    parser.add_argument('-jr', "--join_ratio", type=float, default=1,
                         help="Ratio of clients per round")
     parser.add_argument('-rjr', "--random_join_ratio", type=bool, default=False,
                         help="Random ratio of clients per round")
@@ -423,13 +476,13 @@ if __name__ == "__main__":
                         help="Previous Running times")
     parser.add_argument('-t', "--times", type=int, default=1,
                         help="Running times")
-    parser.add_argument('-eg', "--eval_gap", type=int, default=1,   
+    parser.add_argument('-eg', "--eval_gap", type=int, default=3,   
                         help="Rounds gap for evaluation")     #1
     parser.add_argument('-sfn', "--save_folder_name", type=str, default='items')
     parser.add_argument('-ab', "--auto_break", type=bool, default=False)
     parser.add_argument('-dlg', "--dlg_eval", type=bool, default=False)
     parser.add_argument('-dlgg', "--dlg_gap", type=int, default=100)
-    parser.add_argument('-bnpc', "--batch_num_per_client", type=int, default=20)#2
+    parser.add_argument('-bnpc', "--batch_num_per_client", type=int, default=2)#2
     parser.add_argument('-nnc', "--num_new_clients", type=int, default=0)
     parser.add_argument('-ften', "--fine_tuning_epoch_new", type=int, default=0)
     parser.add_argument('-fd', "--feature_dim", type=int, default=512)
@@ -452,7 +505,7 @@ if __name__ == "__main__":
     parser.add_argument('-bt', "--beta", type=float, default=0.0)
     parser.add_argument('-lam', "--lamda", type=float, default=1.0,
                         help="Regularization weight")
-    parser.add_argument('-mu', "--mu", type=float, default=0.1)#0.0
+    parser.add_argument('-mu', "--mu", type=float, default=0.05)#0.0
     parser.add_argument('-K', "--K", type=int, default=5,
                         help="Number of personalized training steps for pFedMe")
     parser.add_argument('-lrp', "--p_learning_rate", type=float, default=0.01,
@@ -468,7 +521,7 @@ if __name__ == "__main__":
                         help="lambda/sqrt(GLOABL-ITRATION) according to the paper")
     parser.add_argument('-sg', "--sigma", type=float, default=1.0)
     # APFL / FedCross
-    parser.add_argument('-al', "--alpha", type=float, default=0.5)
+    parser.add_argument('-al', "--alpha", type=float, default=1.0)
     # Ditto / FedRep
     parser.add_argument('-pls', "--plocal_epochs", type=int, default=1)
     # MOON / FedCAC / FedLC
@@ -507,11 +560,15 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.device_id
-
+    if args.device == "cuda" and args.device_id:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.device_id
+    # 初始化设备（多卡适配）
+    setup_device(args)
     if args.device == "cuda" and not torch.cuda.is_available():
         print("\ncuda is not avaiable.\n")
-        args.device = "cpu"
+        args.device = torch.device("cpu")
+        args.multi_gpu = False
+
 
     print("=" * 50)
     for arg in vars(args):
